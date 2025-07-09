@@ -2,6 +2,17 @@ from fastapi import FastAPI, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from database import SessionLocal
 import models
+from email import enviar_correo
+from sqlalchemy import and_
+from datetime import datetime
+from auth import hash_password, verify_password, create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES, SECRET_KEY, ALGORITHM
+from datetime import timedelta, date
+from fastapi.security import OAuth2PasswordBearer
+from jose import jwt, JWTError
+from typing import List, Optional
+from decimal import Decimal
+from email import enviar_correo
+
 from schemas import (
     UserCreate, UserLogin, UserOut,
     TransactionCreate, TransactionOut,
@@ -9,12 +20,6 @@ from schemas import (
     FixedPaymentCreate, FixedPaymentOut,
     PagoCreate, PagoOut
 )
-from auth import hash_password, verify_password, create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES, SECRET_KEY, ALGORITHM
-from datetime import timedelta, date
-from fastapi.security import OAuth2PasswordBearer
-from jose import jwt, JWTError
-from typing import List, Optional
-from decimal import Decimal
 
 app = FastAPI()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
@@ -366,3 +371,53 @@ def eliminar_pago(
     db.delete(pago)
     db.commit()
     return {"detail": "Pago eliminado correctamente"}
+
+@app.get("/notificar")
+async def notificar_pagos_fijos(db: Session = Depends(get_db)):
+    hoy = date.today()
+    en_dos_dias = hoy + timedelta(days=2)
+
+    pagos_fijos = db.query(models.PagoFijo).filter(
+        models.PagoFijo.fecha_inicio <= en_dos_dias,
+        models.PagoFijo.activo == True
+    ).all()
+
+    presupuestos = db.query(models.Presupuesto).all()
+    notificados = []
+
+    for pago in pagos_fijos:
+        presupuesto = next((
+            p for p in presupuestos
+            if p.id_categoria == pago.categoria_id and p.id_usuario == pago.id_usuario
+        ), None)
+
+        if not presupuesto or presupuesto.monto < pago.monto:
+            usuario = db.query(models.Usuario).filter(models.Usuario.id_usuario == pago.id_usuario).first()
+            if usuario:
+                asunto = f"[ALERTA] Presupuesto insuficiente para '{pago.descripcion}'"
+                mensaje = (
+                    f"Hola {usuario.nombre},\n\n"
+                    f"Se detectó que tu presupuesto para la categoría del pago '{pago.descripcion}' "
+                    f"es insuficiente.\n"
+                    f"Monto del pago: ${pago.monto:.2f}\n"
+                    f"Presupuesto actual: ${presupuesto.monto if presupuesto else 0:.2f}\n\n"
+                    f"Revisa tu app para evitar sobregiros.\n\nSaludos,\nTu app de finanzas."
+                )
+
+                await enviar_correo(asunto, mensaje, usuario.correo)
+
+                notificacion = models.Notificacion(
+                    id_usuario=usuario.id_usuario,
+                    tipo=models.TipoNotificacion.email,
+                    mensaje=mensaje,
+                    fecha_envio=datetime.now(),
+                    excede_presupuesto=True
+                )
+                db.add(notificacion)
+                db.commit()
+                notificados.append({
+                    "usuario": usuario.correo,
+                    "pago": pago.descripcion
+                })
+
+    return {"notificaciones_enviadas": notificados}
