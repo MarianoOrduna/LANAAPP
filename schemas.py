@@ -45,6 +45,7 @@ class BudgetCreate(BaseModel):
     monto: float
     fecha_crea: date
     fecha_venc: date
+    id_categoria: int
 
 class BudgetOut(BudgetCreate):
     id_presupuesto: int
@@ -70,6 +71,23 @@ class FixedPaymentOut(BaseModel):
     fecha_inicio: date
     activo: bool
     categoria_id: int  
+
+    class Config:
+        from_attributes = True
+
+
+# ---------- PAGOS ----------
+
+class PagoCreate(BaseModel):
+    descripcion: str
+    monto: float
+    fecha_pago: date
+    metodo_pago: Optional[str] = None
+    categoria_id_categoria: Optional[int] = None
+
+class PagoOut(PagoCreate):
+    id_pago: int
+    id_usuario: int
 
     class Config:
         from_attributes = True

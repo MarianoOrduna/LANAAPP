@@ -85,11 +85,14 @@ class Presupuesto(Base):
 
     id_presupuesto = Column(Integer, primary_key=True, index=True, autoincrement=True)
     id_usuario = Column(Integer, ForeignKey("usuario.id_usuario"))
+    id_categoria = Column(Integer, ForeignKey("categoria.id_categoria"))
     monto = Column(DECIMAL(10, 2))
     fecha_crea = Column(Date)
     fecha_venc = Column(Date)
 
     usuario = relationship("Usuario", back_populates="presupuestos")
+    categoria = relationship("Categoria")  
+
 
 class Pago(Base):
     __tablename__ = "pagos"
@@ -100,10 +103,11 @@ class Pago(Base):
     monto = Column(DECIMAL(10, 2))
     fecha_pago = Column(Date)
     metodo_pago = Column(String(100))
-    id_categoria = Column(Integer, ForeignKey("categoria.id_categoria"))
+    categoria_id_categoria = Column(Integer, ForeignKey("categoria.id_categoria"))
 
     usuario = relationship("Usuario", back_populates="pagos")
     categoria = relationship("Categoria", back_populates="pagos")
+
 
 class PagoFijo(Base):
     __tablename__ = "pagos_fijos"

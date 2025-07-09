@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from database import SessionLocal
 import models
@@ -6,17 +6,18 @@ from schemas import (
     UserCreate, UserLogin, UserOut,
     TransactionCreate, TransactionOut,
     BudgetCreate, BudgetOut,
-    FixedPaymentCreate, FixedPaymentOut
+    FixedPaymentCreate, FixedPaymentOut,
+    PagoCreate, PagoOut
 )
 from auth import hash_password, verify_password, create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES, SECRET_KEY, ALGORITHM
-from datetime import timedelta
+from datetime import timedelta, date
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
-from typing import List
+from typing import List, Optional
+from decimal import Decimal
 
 app = FastAPI()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
-
 
 from fastapi.openapi.utils import get_openapi
 
@@ -44,16 +45,12 @@ def custom_openapi():
 
 app.openapi = custom_openapi
 
-
-
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
-
-
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     try:
@@ -69,9 +66,7 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     return user
 
-
-
-@app.post("/register", response_model=UserOut)
+@app.post("/registro", response_model=UserOut)
 def register(user: UserCreate, db: Session = Depends(get_db)):
     existing = db.query(models.Usuario).filter(models.Usuario.correo == user.correo).first()
     if existing:
@@ -82,8 +77,6 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(nuevo_usuario)
     return nuevo_usuario
-
-
 
 @app.post("/login")
 def login(user: UserLogin, db: Session = Depends(get_db)):
@@ -96,10 +89,34 @@ def login(user: UserLogin, db: Session = Depends(get_db)):
     )
     return {"access_token": token, "token_type": "bearer"}
 
-
-
 @app.post("/transacciones", response_model=TransactionOut)
-def crear_transaccion(t: TransactionCreate, db: Session = Depends(get_db), current_user: models.Usuario = Depends(get_current_user)):
+def crear_transaccion(
+    t: TransactionCreate,
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(get_current_user)
+):
+    if t.tipo == "gasto":
+        
+        presupuesto = db.query(models.Presupuesto).filter(
+            models.Presupuesto.id_usuario == current_user.id_usuario,
+            models.Presupuesto.id_categoria == t.id_categoria
+        ).first()
+
+        if presupuesto:
+            inicio_mes = date.today().replace(day=1)
+            gastos = db.query(models.Transaccion).filter(
+                models.Transaccion.id_usuario == current_user.id_usuario,
+                models.Transaccion.id_categoria == t.id_categoria,
+                models.Transaccion.tipo == "gasto",
+                models.Transaccion.fecha >= inicio_mes
+            ).all()
+            total_gastado = sum(g.monto for g in gastos)
+            if total_gastado + Decimal(str(t.monto)) > presupuesto.monto:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Presupuesto mensual excedido en categoría ID {t.id_categoria}."
+                )
+
     transaccion = models.Transaccion(
         tipo=t.tipo,
         descripcion=t.descripcion,
@@ -144,8 +161,6 @@ def eliminar_transaccion(id: int, db: Session = Depends(get_db), current_user: m
     db.commit()
     return {"detail": "Eliminada"}
 
-
-
 @app.get("/resumen/categorias")
 def resumen_por_categoria(db: Session = Depends(get_db), current_user: models.Usuario = Depends(get_current_user)):
     from sqlalchemy import func
@@ -155,7 +170,37 @@ def resumen_por_categoria(db: Session = Depends(get_db), current_user: models.Us
         .group_by(models.Categoria.nombre).all()
     return [{"categoria": r[0], "total": float(r[1])} for r in resumen]
 
+@app.get("/resumen/graficas")
+def resumen_graficas(
+    tipo: Optional[str] = Query(None, regex="^(ingreso|gasto)$"),
+    fecha_inicio: Optional[date] = None,
+    fecha_fin: Optional[date] = None,
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(get_current_user)
+):
+    from sqlalchemy import func
 
+    query = db.query(
+        models.Categoria.nombre,
+        func.sum(models.Transaccion.monto).label("total")
+    ).join(
+        models.Transaccion,
+        models.Categoria.id_categoria == models.Transaccion.id_categoria
+    ).filter(
+        models.Transaccion.id_usuario == current_user.id_usuario
+    )
+
+    if tipo:
+        query = query.filter(models.Transaccion.tipo == tipo)
+    if fecha_inicio:
+        query = query.filter(models.Transaccion.fecha >= fecha_inicio)
+    if fecha_fin:
+        query = query.filter(models.Transaccion.fecha <= fecha_fin)
+
+    query = query.group_by(models.Categoria.nombre)
+    resultados = query.all()
+
+    return [{"categoria": r[0], "total": float(r[1]) if r[1] else 0.0} for r in resultados]
 
 @app.post("/presupuestos", response_model=BudgetOut)
 def crear_presupuesto(p: BudgetCreate, db: Session = Depends(get_db), current_user: models.Usuario = Depends(get_current_user)):
@@ -163,14 +208,13 @@ def crear_presupuesto(p: BudgetCreate, db: Session = Depends(get_db), current_us
         monto=p.monto,
         fecha_crea=p.fecha_crea,
         fecha_venc=p.fecha_venc,
-        id_usuario=current_user.id_usuario  
+        id_usuario=current_user.id_usuario,
+        id_categoria=p.id_categoria 
     )
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
     return nuevo
-
-
 
 @app.get("/presupuestos", response_model=List[BudgetOut])
 def obtener_presupuestos(db: Session = Depends(get_db)):
@@ -196,7 +240,7 @@ def eliminar_presupuesto(id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"detail": "Eliminado"}
 
-@app.post("/pagos-fijos", response_model=FixedPaymentOut)
+@app.post("/pagosFijos", response_model=FixedPaymentOut)
 def crear_pago(
     p: FixedPaymentCreate,
     db: Session = Depends(get_db),
@@ -215,13 +259,11 @@ def crear_pago(
     db.refresh(nuevo)
     return nuevo
 
-
-@app.get("/pagos-fijos", response_model=List[FixedPaymentOut])
+@app.get("/pagosFijos", response_model=List[FixedPaymentOut])
 def obtener_pagos(db: Session = Depends(get_db), current_user: models.Usuario = Depends(get_current_user)):
     return db.query(models.PagoFijo).filter(models.PagoFijo.id_usuario == current_user.id_usuario).all()
 
-
-@app.put("/pagos-fijos/{id}", response_model=FixedPaymentOut)
+@app.put("/pagosFijos/{id}", response_model=FixedPaymentOut)
 def actualizar_pago(
     id: int,
     p: FixedPaymentCreate,
@@ -243,8 +285,7 @@ def actualizar_pago(
     db.refresh(pago)
     return pago
 
-
-@app.delete("/pagos-fijos/{id}")
+@app.delete("/pagosFijos/{id}")
 def eliminar_pago(
     id: int,
     db: Session = Depends(get_db),
@@ -259,3 +300,69 @@ def eliminar_pago(
     db.delete(pago)
     db.commit()
     return {"detail": "Eliminado"}
+
+@app.post("/pagos", response_model=PagoOut)
+def crear_pago(
+    p: PagoCreate,
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(get_current_user)
+):
+    nuevo = models.Pago(
+        id_usuario=current_user.id_usuario,
+        descripcion=p.descripcion,
+        monto=p.monto,
+        fecha_pago=p.fecha_pago,
+        metodo_pago=p.metodo_pago,
+        categoria_id_categoria=p.categoria_id_categoria
+    )
+    db.add(nuevo)
+    db.commit()
+    db.refresh(nuevo)
+    return nuevo
+
+@app.get("/pagos", response_model=List[PagoOut])
+def obtener_pagos(
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(get_current_user)
+):
+    return db.query(models.Pago).filter(models.Pago.id_usuario == current_user.id_usuario).all()
+
+@app.get("/pagos/{id_pago}", response_model=PagoOut)
+def obtener_pago_por_id(
+    id_pago: int,
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(get_current_user)
+):
+    pago = db.query(models.Pago).filter(models.Pago.id_pago == id_pago, models.Pago.id_usuario == current_user.id_usuario).first()
+    if not pago:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+    return pago
+
+@app.put("/pagos/{id_pago}", response_model=PagoOut)
+def actualizar_pago(
+    id_pago: int,
+    datos: PagoCreate,
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(get_current_user)
+):
+    pago = db.query(models.Pago).filter(models.Pago.id_pago == id_pago, models.Pago.id_usuario == current_user.id_usuario).first()
+    if not pago:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+    for attr, value in datos.dict().items():
+        setattr(pago, attr, value)
+    db.commit()
+    db.refresh(pago)
+    return pago
+
+@app.delete("/pagos/{id_pago}")
+def eliminar_pago(
+    id_pago: int,
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(get_current_user)
+):
+    pago = db.query(models.Pago).filter(models.Pago.id_pago == id_pago, models.Pago.id_usuario == current_user.id_usuario).first()
+    if not pago:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+    db.delete(pago)
+    db.commit()
+    return {"detail": "Pago eliminado correctamente"}
